@@ -11,6 +11,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use futures_util::{SinkExt, stream::StreamExt};
 use tracing::*;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
@@ -117,6 +118,8 @@ async fn signalling_loop(
 ) -> anyhow::Result<()> {
     debug!("Connected to session '{stream}'");
 
+    let (mut ws_send, mut ws_recv) = socket.split();
+
     tokio::select! {
         res = async {
             loop {
@@ -124,7 +127,9 @@ async fn signalling_loop(
 
                 match msg {
                     Some(msg) => {
+                        let j = serde_json::to_string(&msg)?;
 
+                        ws_send.send(Message::Text(j)).await?;
                     },
                     _ => {},
                 }
@@ -133,11 +138,11 @@ async fn signalling_loop(
 
         res = async {
             loop {
-                let msg = socket.recv().await;
+                let msg = ws_recv.next().await;
 
                 match msg {
                     Some(Ok(Message::Text(txt))) => {
-                        let msg = todo!();
+                        let msg = serde_json::from_str(&txt)?;
 
                         tx.send(msg).await?;
                     },

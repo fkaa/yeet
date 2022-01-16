@@ -1,0 +1,32 @@
+html {padding:0; margin:1em;font-family:sans-serif}
+body {height:100%; padding:0; margin:0; border:0;}
+
+div#dropzone {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 9999999999;
+    width: 100%;
+    height: 100%;
+    display: none;
+}
+
+.border {border:15px dashed black}
+.disabled {color:gray}
+
+.mark {background-color:yellow;}
+.disabled .mark {
+    background-color: transparent;
+}
+
+#parent {
+    display: table;
+    width:100%;
+    height:100%;
+}
+
+#child {
+    display: table-cell;
+    vertical-align: middle;
+    text-align: center;
+}

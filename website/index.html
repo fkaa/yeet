@@ -1,10 +1,25 @@
 <html>
     <head>
-
+        <!--<link rel="stylesheet" href="swiss.css" />-->
+        <link rel="stylesheet" href="style.css" />
     </head>
 
     <body>
-        <input id="file-upload" type="file" />
+        <div id="parent">
+            <div id="child">
+                <div id="choose">
+                    <h2>1. <span class="mark">Choose</span> or <span class="mark">drag & drop</span> a file</h2>
+                    <input id="file-upload" type="file" />
+                </div>
+
+                <div id="share" class="disabled">
+                    <h2>2. Click <span class="mark">Share</span> to get a shareable link</h2>
+                    <button id="share-btn" disabled>Share</button>
+                </div>
+
+            </div>
+        </div>
+        <div id="dropzone">
         <script src="app.js"></script>
     </body>
 </html>
