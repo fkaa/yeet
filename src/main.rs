@@ -1,29 +1,61 @@
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
-use axum::{Router, routing::get, extract::{WebSocketUpgrade, Path, Extension, ws::WebSocket}, response::IntoResponse, AddExtensionLayer};
+use axum::{
+    extract::{
+        ws::{Message, WebSocket},
+        Extension, Path, WebSocketUpgrade,
+    },
+    response::IntoResponse,
+    routing::get,
+    AddExtensionLayer, Router,
+};
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tracing::*;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
-use tokio::sync::mpsc::{self, Sender, Receiver};
 
-use std::sync::RwLock;
 use std::collections::HashMap;
+use std::sync::RwLock;
 
 type Channel = (Sender<ClientMessage>, Receiver<ClientMessage>);
 
+/// Contains the channel receivers that incoming websocket connections
+/// should use.
 struct SessionState {
-    creator: Channel,
-    participant: Channel,
+    bob: Option<Receiver<ClientMessage>>,
+    bob_sender: Sender<ClientMessage>,
+    alice: Option<Receiver<ClientMessage>>,
+    alice_sender: Sender<ClientMessage>,
 }
 
 impl SessionState {
     fn new() -> Self {
-        let creator = mpsc::channel(50);
-        let participant = mpsc::channel(50);
+        let (bob_sender, bob) = mpsc::channel(50);
+        let (alice_sender, alice) = mpsc::channel(50);
 
         SessionState {
-            creator,
-            participant,
+            bob: Some(bob),
+            bob_sender,
+            alice: Some(alice),
+            alice_sender,
         }
+    }
+
+    fn return_channel(&mut self, rx: Receiver<ClientMessage>) -> bool {
+        if self.bob.is_none() {
+            self.bob = Some(rx);
+        } else if self.alice.is_none() {
+            self.alice = Some(rx);
+        }
+
+        self.bob.is_some() && self.alice.is_some()
+    }
+
+    fn take(&mut self) -> Option<(Sender<ClientMessage>, Receiver<ClientMessage>)> {
+        self.bob
+            .take()
+            .map(|rx| (self.bob_sender.clone(), rx))
+            .or_else(|| self.alice.take().map(|rx| (self.alice_sender.clone(), rx)))
     }
 }
 
@@ -31,10 +63,9 @@ struct AppData {
     sessions: Arc<RwLock<HashMap<String, SessionState>>>,
 }
 
-enum ServerMessage {
-}
+enum ServerMessage {}
 
-#[derive(Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 enum ClientMessage {
     /// Someone has joined the session
     ParticipantJoin,
@@ -47,7 +78,7 @@ enum ClientMessage {
     /// An offer to upload a file
     FileOffer {
         name: String,
-        size: u64
+        size: u64,
     },
 
     FileOfferResponse {
@@ -58,13 +89,17 @@ enum ClientMessage {
     NewIceCandidate,
 
     /// A SDP offer that the creator of the session will send
-    SdpOffer { sdp: String },
+    SdpOffer {
+        sdp: String,
+    },
 
     /// Answer from the other participant
-    Answer { sdp: String },
+    Answer {
+        sdp: String,
+    },
 }
 
-pub async fn websocket_signalling(
+async fn websocket_signalling(
     ws: WebSocketUpgrade,
     Path(stream): Path<String>,
     Extension(data): Extension<Arc<AppData>>,
@@ -74,36 +109,106 @@ pub async fn websocket_signalling(
     ws.on_upgrade(move |socket| handle_websocket_signalling(socket, stream, data))
 }
 
-async fn handle_websocket_signalling(socket: WebSocket, stream: String, data: Arc<AppData>) {
-    let mut sessions = data.sessions.write().unwrap();
+async fn signalling_loop(
+    mut socket: WebSocket,
+    stream: &str,
+    tx: Sender<ClientMessage>,
+    rx: &mut Receiver<ClientMessage>,
+) -> anyhow::Result<()> {
+    debug!("Connected to session '{stream}'");
 
-    if let Some(session) = sessions.get(&stream) {
-    } else {
-        let state = SessionState::new();
-        let creator = state.creator.clone();
+    tokio::select! {
+        res = async {
+            loop {
+                let msg = rx.recv().await;
 
-        sessions.insert(stream, state);
+                match msg {
+                    Some(msg) => {
+
+                    },
+                    _ => {},
+                }
+            }
+        } => res,
+
+        res = async {
+            loop {
+                let msg = socket.recv().await;
+
+                match msg {
+                    Some(Ok(Message::Text(txt))) => {
+                        let msg = todo!();
+
+                        tx.send(msg).await?;
+                    },
+                    Some(Ok(Message::Close(close))) => {
+                        anyhow::bail!("WebSocket closed by remote: {close:?}")
+                    },
+                    Some(Err(e)) => Err(e)?,
+                    None => anyhow::bail!("No more message from WebSocket"),
+                    _ => {},
+                }
+            }
+        } => res,
     }
 }
 
-async fn negotiate(
-    a: (Sender<ClientMessage>, Receiver<ClientMessage>),
-    b: (Sender<ClientMessage>, Receiver<ClientMessage>)
-) {
+async fn handle_websocket_signalling(socket: WebSocket, stream: String, data: Arc<AppData>) {
+    let mut channels = {
+        let mut sessions = data.sessions.write().unwrap();
 
+        if let Some(session) = sessions.get_mut(&stream) {
+            session.take()
+        } else {
+            let mut state = SessionState::new();
+
+            debug!("Created new session for '{stream}'");
+
+            let (tx, rx) = state.take().unwrap();
+
+            sessions.insert(stream.clone(), state);
+
+            Some((tx, rx))
+        }
+    };
+
+    if let Some((tx, mut rx)) = channels {
+        if let Err(e) = signalling_loop(socket, &stream, tx, &mut rx).await {
+            warn!("Error while handling signalling for {stream}: {e}");
+        }
+
+        let mut sessions = data.sessions.write().unwrap();
+        let session = sessions.get_mut(&stream).unwrap();
+        let is_empty = session.return_channel(rx);
+
+        if is_empty {
+            debug!("Session '{stream}' is empty, removing");
+
+            sessions.remove(&stream);
+        }
+    } else {
+        debug!("Session '{stream}' is already full");
+    }
+
+    debug!("Left session '{stream}'");
+
+    // socket.close().await;
 }
 
 async fn start() -> anyhow::Result<()> {
-    /*let data = Arc::new(AppData {
-        stream_repo,
-        client: client.clone(),
-        stream_stat_sender,
-    });*/
+    let data = Arc::new(AppData {
+        sessions: Arc::new(RwLock::new(HashMap::new())),
+    });
 
     let app = Router::new()
         .route("/signalling/:stream", get(websocket_signalling))
         .layer(AddExtensionLayer::new(data.clone()));
 
+    let addr = "127.0.0.1:8080".parse().unwrap();
+    hyper::Server::bind(&addr)
+        .serve(app.into_make_service())
+        .await
+        .unwrap();
 
     Ok(())
 }
