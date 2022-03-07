@@ -1,5 +1,5 @@
-html {padding:0; margin:1em;font-family:sans-serif}
-body {height:100%; padding:0; margin:0; border:0;}
+html {padding:0; height:100%; margin:0;font-family:sans-serif}
+body {height:100%; padding:2em; box-sizing: border-box; margin:0; border:0;}
 
 div#dropzone {
     position: fixed;
@@ -11,6 +11,7 @@ div#dropzone {
     display: none;
 }
 
+.separator {border-top:1px solid black}
 .border {border:15px dashed black}
 .disabled {color:gray}
 
@@ -19,14 +20,30 @@ div#dropzone {
     background-color: transparent;
 }
 
+#sharing {
+    display: none;
+}
+#share-link {
+    display: none;
+}
+#download-file {
+    display: none;
+}
 #parent {
     display: table;
     width:100%;
     height:100%;
+    box-sizing: border-box;
+    border:15px dashed transparent;
 }
 
 #child {
     display: table-cell;
     vertical-align: middle;
     text-align: center;
+}
+
+.container {
+    margin: auto;
+    max-width: 25em;
 }

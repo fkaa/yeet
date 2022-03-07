@@ -1,25 +1,51 @@
+<!DOCTYPE html>
 <html>
-    <head>
-        <!--<link rel="stylesheet" href="swiss.css" />-->
-        <link rel="stylesheet" href="style.css" />
-    </head>
+  <head>
+    <!--<link rel="stylesheet" href="swiss.css" />-->
+    <link rel="stylesheet" href="style.css" />
+    <meta charset="utf-8">
+  </head>
 
-    <body>
-        <div id="parent">
-            <div id="child">
-                <div id="choose">
-                    <h2>1. <span class="mark">Choose</span> or <span class="mark">drag & drop</span> a file</h2>
-                    <input id="file-upload" type="file" />
-                </div>
+  <body>
+    <div id="parent">
+      <div id="child">
+        <div class="container">
+          <div id="choose">
+            <h2>1. <span class="mark">Choose</span> or <span class="mark">drag & drop</span> a file</h2>
+            <input id="file-upload" type="file" />
+          </div>
 
-                <div id="share" class="disabled">
-                    <h2>2. Click <span class="mark">Share</span> to get a shareable link</h2>
-                    <button id="share-btn" disabled>Share</button>
-                </div>
+          <div id="share" class="disabled">
+            <h2>2. Click <span class="mark">share</span> to get a link</h2>
+            <button id="share-btn" disabled>Share</button>
+          </div>
 
+          <div id="sharing">
+
+            <h1>Status</h1>
+            <div>
+              <progress id="progress">test</progress>
+              <p id="status"></p>
             </div>
+
+            <div id="download-file">
+              <h1>File</h1>
+              <h2 style="color:gray;" id="filename"></h2>
+              <button id="dl-btn">Start download</button>
+            </div>
+
+            <div id="share-link">
+              <h1>Link</h1>
+              <p><a id="link" href="#test"></a></p>
+            </div>
+
+          </div>
         </div>
-        <div id="dropzone">
-        <script src="app.js"></script>
-    </body>
+      </div>
+    </div>
+    <div id="dropzone">
+    </div>
+    <!--<script src="StreamSaver.js"></script>-->
+    <script src="app.js"></script>
+  </body>
 </html>

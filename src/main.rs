@@ -5,58 +5,104 @@ use axum::{
         ws::{Message, WebSocket},
         Extension, Path, WebSocketUpgrade,
     },
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::get,
     AddExtensionLayer, Router,
 };
+use futures_util::{stream::StreamExt, SinkExt};
+use hyper::StatusCode;
+use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use futures_util::{SinkExt, stream::StreamExt};
+use tokio::sync::RwLock;
+use tokio::sync::{
+    broadcast::{self},
+    oneshot,
+};
 use tracing::*;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use std::collections::HashMap;
-use std::sync::RwLock;
-
-type Channel = (Sender<ClientMessage>, Receiver<ClientMessage>);
+use std::sync::Mutex;
 
 /// Contains the channel receivers that incoming websocket connections
 /// should use.
 struct SessionState {
-    bob: Option<Receiver<ClientMessage>>,
-    bob_sender: Sender<ClientMessage>,
-    alice: Option<Receiver<ClientMessage>>,
-    alice_sender: Sender<ClientMessage>,
+    file_name: String,
+    file_size: u64,
+    sender_tx: broadcast::Sender<ClientMessage>,
+    receiver_tx: broadcast::Sender<ClientMessage>,
+
+    cancellation_tx: broadcast::Sender<()>,
+    cancellation_rx: broadcast::Receiver<()>,
+    participants: Mutex<(bool, bool)>,
+    // bob: Option<Receiver<ClientMessage>>,
+    // bob_sender: Sender<ClientMessage>,
+    // alice: Option<Receiver<ClientMessage>>,
+    // alice_sender: Sender<ClientMessage>,
 }
 
 impl SessionState {
-    fn new() -> Self {
-        let (bob_sender, bob) = mpsc::channel(50);
-        let (alice_sender, alice) = mpsc::channel(50);
+    fn new(file_name: String, file_size: u64) -> Self {
+        let (sender_tx, _) = broadcast::channel(50);
+        let (receiver_tx, _) = broadcast::channel(50);
+
+        let (cancellation_tx, cancellation_rx) = broadcast::channel(1);
 
         SessionState {
-            bob: Some(bob),
-            bob_sender,
-            alice: Some(alice),
-            alice_sender,
+            file_name,
+            file_size,
+            sender_tx,
+            receiver_tx,
+            cancellation_tx,
+            cancellation_rx,
+            participants: Mutex::new((false, false)),
         }
     }
 
-    fn return_channel(&mut self, rx: Receiver<ClientMessage>) -> bool {
-        if self.bob.is_none() {
-            self.bob = Some(rx);
-        } else if self.alice.is_none() {
-            self.alice = Some(rx);
-        }
+    fn get_sender(
+        &self,
+    ) -> Option<(
+        broadcast::Sender<ClientMessage>,
+        broadcast::Receiver<ClientMessage>,
+    )> {
+        let mut p = self.participants.lock().unwrap();
 
-        self.bob.is_some() && self.alice.is_some()
+        if p.0 {
+            None
+        } else {
+            (*p).0 = true;
+
+            let tx = self.receiver_tx.clone();
+            let rx = self.sender_tx.subscribe();
+
+            Some((tx, rx))
+        }
     }
 
-    fn take(&mut self) -> Option<(Sender<ClientMessage>, Receiver<ClientMessage>)> {
-        self.bob
-            .take()
-            .map(|rx| (self.bob_sender.clone(), rx))
-            .or_else(|| self.alice.take().map(|rx| (self.alice_sender.clone(), rx)))
+    fn return_receiver(&self) {
+        let mut p = self.participants.lock().unwrap();
+        (*p).1 = false;
+    }
+
+    fn get_receiver(
+        &self,
+    ) -> Option<(
+        broadcast::Sender<ClientMessage>,
+        broadcast::Receiver<ClientMessage>,
+    )> {
+        let mut p = self.participants.lock().unwrap();
+
+        if p.1 {
+            None
+        } else {
+            (*p).1 = true;
+
+            let tx = self.sender_tx.clone();
+            let rx = self.receiver_tx.subscribe();
+
+            Some((tx, rx))
+        }
     }
 }
 
@@ -68,6 +114,27 @@ enum ServerMessage {}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 enum ClientMessage {
+    /// An offer to upload a file
+    UploadFile {
+        name: String,
+        size: u64,
+    },
+
+    /// Response to file upload
+    UploadFileResponse {
+        link: String,
+    },
+
+    JoinSession {
+        id: String,
+    },
+
+    /// Information about a session
+    SessionInfo {
+        file_name: String,
+        size: u64,
+    },
+
     /// Someone has joined the session
     ParticipantJoin,
 
@@ -75,76 +142,77 @@ enum ClientMessage {
     ParticipantLeave,
 
     CreateSession,
+    StartSignalling,
+    SessionFull,
+    SessionNotFound,
+    SessionCancelled,
 
-    /// An offer to upload a file
-    FileOffer {
-        name: String,
-        size: u64,
-    },
+    Download,
 
     FileOfferResponse {
         answer: bool,
     },
 
     /// A new ICE candidate to be forwarded to the other participant
-    NewIceCandidate,
+    #[serde(rename = "candidate")]
+    NewIceCandidate {
+        candidate: String,
+        #[serde(rename = "sdpMid")]
+        sdp_mid: String,
+        #[serde(rename = "sdpMLineIndex")]
+        sdp_mline_index: u32,
+        #[serde(rename = "usernameFragment")]
+        username_fragment: String,
+    },
 
     /// A SDP offer that the creator of the session will send
-    SdpOffer {
-        sdp: String,
-    },
+    #[serde(rename = "offer")]
+    SdpOffer(String),
 
     /// Answer from the other participant
-    Answer {
-        sdp: String,
-    },
+    #[serde(rename = "answer")]
+    SdpAnswer(String),
 }
 
 async fn websocket_signalling(
     ws: WebSocketUpgrade,
-    Path(stream): Path<String>,
     Extension(data): Extension<Arc<AppData>>,
 ) -> impl IntoResponse {
-    debug!("Received websocket request for '{}'", stream);
-
-    ws.on_upgrade(move |socket| handle_websocket_signalling(socket, stream, data))
+    ws.on_upgrade(move |socket| handle_websocket_signalling(socket, data))
 }
 
 async fn signalling_loop(
     mut socket: WebSocket,
-    stream: &str,
-    tx: Sender<ClientMessage>,
-    rx: &mut Receiver<ClientMessage>,
+    id: String,
+    tx: broadcast::Sender<ClientMessage>,
+    mut rx: broadcast::Receiver<ClientMessage>,
+    mut cancellation: broadcast::Receiver<()>,
+    is_uploader: bool,
 ) -> anyhow::Result<()> {
-    debug!("Connected to session '{stream}'");
-
     let (mut ws_send, mut ws_recv) = socket.split();
 
     tokio::select! {
         res = async {
             loop {
-                let msg = rx.recv().await;
+                let msg = rx.recv().await?;
 
-                match msg {
-                    Some(msg) => {
-                        let j = serde_json::to_string(&msg)?;
+                debug!(id = ?id, uploader = ?is_uploader, "=> {msg:?}");
 
-                        ws_send.send(Message::Text(j)).await?;
-                    },
-                    _ => {},
-                }
+                ws_send.send(Message::Text(serde_json::to_string(&msg)?)).await?;
             }
         } => res,
-
         res = async {
             loop {
                 let msg = ws_recv.next().await;
+
 
                 match msg {
                     Some(Ok(Message::Text(txt))) => {
                         let msg = serde_json::from_str(&txt)?;
 
-                        tx.send(msg).await?;
+                        debug!(id = ?id, uploader = ?is_uploader, "<= {msg:?}");
+
+                        tx.send(msg)?;
                     },
                     Some(Ok(Message::Close(close))) => {
                         anyhow::bail!("WebSocket closed by remote: {close:?}")
@@ -155,49 +223,181 @@ async fn signalling_loop(
                 }
             }
         } => res,
+        res = cancellation.recv() => {
+            ws_send.send(
+                Message::Text(
+                    serde_json::to_string(&ClientMessage::SessionCancelled).unwrap()
+                )
+            ).await?;
+
+            Ok(())
+        }
     }
 }
 
-async fn handle_websocket_signalling(socket: WebSocket, stream: String, data: Arc<AppData>) {
-    let mut channels = {
-        let mut sessions = data.sessions.write().unwrap();
+async fn wait_for_message(socket: &mut WebSocket) -> anyhow::Result<ClientMessage> {
+    loop {
+        let msg = socket.recv().await;
 
-        if let Some(session) = sessions.get_mut(&stream) {
-            session.take()
-        } else {
-            let mut state = SessionState::new();
+        match msg {
+            Some(Ok(Message::Text(txt))) => {
+                dbg!(&txt);
+                let msg = serde_json::from_str(&txt)?;
 
-            debug!("Created new session for '{stream}'");
-
-            let (tx, rx) = state.take().unwrap();
-
-            sessions.insert(stream.clone(), state);
-
-            Some((tx, rx))
+                return Ok(msg);
+            }
+            Some(Ok(Message::Close(close))) => {
+                anyhow::bail!("WebSocket closed by remote: {close:?}")
+            }
+            Some(Err(e)) => Err(e)?,
+            None => anyhow::bail!("No more message from WebSocket"),
+            _ => {}
         }
+    }
+}
+async fn handle_file_upload(
+    mut socket: WebSocket,
+    data: Arc<AppData>,
+    file_name: String,
+    size: u64,
+) -> anyhow::Result<()> {
+    let link = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(48)
+        .map(char::from)
+        .collect::<String>();
+
+    debug!(id = ?link, "Got upload request");
+
+    let (link, tx, rx, c_tx, c_rx) = {
+        let mut sessions = data.sessions.write().await;
+        if sessions.contains_key(&link) {
+            anyhow::bail!("Already exists an uploader for link '{}'", link);
+        }
+
+        // TODO: don't hold RW lock for longer than necessary..
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&ClientMessage::UploadFileResponse { link: link.clone() })
+                    .unwrap(),
+            ))
+            .await?;
+
+        let state = SessionState::new(file_name, size);
+
+        let cancellation_rx = state.cancellation_tx.subscribe();
+        let cancellation_tx = state.cancellation_tx.clone();
+        let (tx, rx) = state.get_sender().unwrap();
+
+        sessions.insert(link.clone(), state);
+        debug!("Created new session for '{link}'");
+
+        (link, tx, rx, cancellation_tx, cancellation_rx)
     };
 
-    if let Some((tx, mut rx)) = channels {
-        if let Err(e) = signalling_loop(socket, &stream, tx, &mut rx).await {
-            warn!("Error while handling signalling for {stream}: {e}");
-        }
-
-        let mut sessions = data.sessions.write().unwrap();
-        let session = sessions.get_mut(&stream).unwrap();
-        let is_empty = session.return_channel(rx);
-
-        if is_empty {
-            debug!("Session '{stream}' is empty, removing");
-
-            sessions.remove(&stream);
-        }
-    } else {
-        debug!("Session '{stream}' is already full");
+    match signalling_loop(socket, link.clone(), tx, rx, c_rx, true).await {
+        Ok(_) => {
+            debug!(id = ?link, uploader = true, "Finished signalling loop");
+        },
+        Err(e) => {
+            error!(id = ?link, uploader = true, "Failed to finish signalling loop: {e}");
+        },
     }
 
-    debug!("Left session '{stream}'");
+    debug!(id = ?link,"Removing session");
+    let mut sessions = data.sessions.write().await;
+    sessions.remove(&link);
 
-    // socket.close().await;
+    c_tx.send(())?;
+
+    Ok(())
+}
+
+async fn handle_first_message(mut socket: WebSocket, data: Arc<AppData>) -> anyhow::Result<()> {
+    match wait_for_message(&mut socket).await? {
+        ClientMessage::UploadFile { name, size } => {
+            handle_file_upload(socket, data, name, size).await?
+        }
+        ClientMessage::JoinSession { id } => handle_join_session(socket, data, id).await?,
+        msg @ _ => anyhow::bail!("Unexpected message received: {:?}", msg),
+    }
+
+    Ok(())
+}
+
+async fn send(socket: &mut WebSocket, message: &ClientMessage) -> anyhow::Result<()> {
+    socket
+        .send(Message::Text(serde_json::to_string(&message).unwrap()))
+        .await?;
+
+    Ok(())
+}
+
+async fn handle_join_session(
+    mut socket: WebSocket,
+    data: Arc<AppData>,
+    id: String,
+) -> anyhow::Result<()> {
+    debug!(id = ?id, "Got join request");
+
+    let (tx, rx, c_rx) = {
+        let mut sessions = data.sessions.write().await;
+
+        if let Some(state) = sessions.get_mut(&id) {
+            if let Some((tx, rx)) = state.get_receiver() {
+                send(
+                    &mut socket,
+                    &ClientMessage::SessionInfo {
+                        file_name: state.file_name.clone(),
+                        size: state.file_size,
+                    },
+                )
+                .await?;
+
+                (tx, rx, state.cancellation_tx.subscribe())
+            } else {
+                send(&mut socket, &ClientMessage::SessionFull).await?;
+
+                anyhow::bail!("Session already full for '{}'", id);
+            }
+        } else {
+            send(&mut socket, &ClientMessage::SessionNotFound).await?;
+
+            anyhow::bail!("No session found for '{}'", id);
+        }
+
+        // TODO: don't hold RW lock for longer than necessary..
+    };
+
+    match signalling_loop(socket, id.clone(), tx, rx, c_rx, false).await {
+        Ok(_) => {
+            debug!(id = ?id, uploader = false, "Finished signalling loop");
+        },
+        Err(e) => {
+            error!(id = ?id, uploader = false, "Failed to finish signalling loop: {e}");
+        },
+    }
+
+    let mut sessions = data.sessions.write().await;
+    if let Some(state) = sessions.get_mut(&id) {
+        state.return_receiver();
+    }
+
+    Ok(())
+}
+
+async fn handle_websocket_signalling(socket: WebSocket, data: Arc<AppData>) -> Response<()> {
+    match handle_first_message(socket, data).await {
+        Ok(()) => Response::builder().status(StatusCode::OK).body(()).unwrap(),
+        Err(e) => {
+            error!("Failed to complete signalling: {e}");
+
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(())
+                .unwrap()
+        }
+    }
 }
 
 async fn start() -> anyhow::Result<()> {
@@ -206,10 +406,10 @@ async fn start() -> anyhow::Result<()> {
     });
 
     let app = Router::new()
-        .route("/signalling/:stream", get(websocket_signalling))
+        .route("/signalling", get(websocket_signalling))
         .layer(AddExtensionLayer::new(data.clone()));
 
-    let addr = "127.0.0.1:8080".parse().unwrap();
+    let addr = "127.0.0.1:12489".parse().unwrap();
     hyper::Server::bind(&addr)
         .serve(app.into_make_service())
         .await
