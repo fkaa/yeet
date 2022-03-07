@@ -26,12 +26,6 @@ function generateId (len) {
   return Array.from(arr, dec2hex).join('')
 }
 
-let fileUpload = document.getElementById("file-upload");
-fileUpload.addEventListener("change", function(e) {
-    let file = fileUpload.files[0];
-
-    nextStep(file);
-});
 
 let chooseDiv = document.getElementById("choose");
 let shareDiv = document.getElementById("share");
@@ -44,12 +38,29 @@ let dropZone = document.getElementById("dropzone");
 let parentDiv = document.getElementById("parent");
 let progress = document.getElementById("progress");
 let status = document.getElementById("status");
+let statusLog = document.getElementById("status-log");
 let link = document.getElementById("link");
 let filename = document.getElementById("filename");
 let html = document.documentElement;
 let fileName = "";
 let fileSize = 1;
 let receivedBytes = 0;
+
+let fileUpload = document.getElementById("file-upload");
+if (fileUpload.files[0] !== undefined) {
+    nextStep(fileUpload.files[0]);
+}
+fileUpload.addEventListener("change", function(e) {
+    let file = fileUpload.files[0];
+
+    nextStep(file);
+});
+
+const STATE_WAITING = 0;
+const STATE_SIGNALLING = 1;
+const STATE_TRANSFERRING = 2;
+
+let state = STATE_WAITING;
 
 function isFile(evt) {
     var dt = evt.dataTransfer;
@@ -63,7 +74,8 @@ function isFile(evt) {
 }
 
 function setProgress(p) {
-    if (progress != null) {
+    if (p !== null) {
+        // console.log(p);
         progress.setAttribute("value", p);
     } else {
         progress.removeAttribute("value");
@@ -72,6 +84,12 @@ function setProgress(p) {
 
 function setStatus(text) {
     status.innerText = text;
+    status.classList.remove("error");
+}
+
+function setErrorStatus(text) {
+    status.innerText = text;
+    status.classList.add("error");
 }
 
 function dragEnter(ev) {
@@ -129,11 +147,6 @@ window.addEventListener("dragleave", dragLeave);
 window.addEventListener("dragover", dragOver);
 window.addEventListener("drop", dragDrop);
 
-//html.ondragenter = dragEnter;
-//html.ondragend = dragEnd;
-//html.ondragleave = dragLeave;
-
-
 function nextStep(file) {
     fileToShare = file;
     parentDiv.style.borderColor = "transparent";
@@ -152,11 +165,6 @@ function startDownload() {
     setStatus("Establishing connection...");
 
     startFakeDownloadRequest(fileName, fileSize);
-    /*fileStream = streamSaver.createWriteStream(fileName, {
-        size: fileSize
-    });*/
-
-
 }
 
 function download(href) {
@@ -204,6 +212,8 @@ function onServiceWorkerMessage(event) {
     download(href);
     console.log("finished download dialog?");
 
+    state = STATE_SIGNALLING;
+
     startWebRtc();
     setupReceiverChannel();
 
@@ -219,7 +229,7 @@ function share() {
     setStatus("Creating link...");
 
     socket = new WebSocket('ws://localhost:8080/signalling');
-    socket.onclose = (err) => console.error(err);
+    socket.onclose = onUploaderSignallingSocketClosed;
     socket.onmessage = onMessage;
 
     socket.onopen = function() {
@@ -230,6 +240,20 @@ function share() {
         setStatus("Waiting for someone to click link...");
     };
 
+}
+
+function onUploaderSignallingSocketClosed(event) {
+    if (state <= STATE_SIGNALLING) {
+        setErrorStatus("Connection to signalling server lost");
+        setProgress(0);
+    }
+}
+
+function onDownloaderSignallingSocketClosed(event) {
+    if (state == STATE_SIGNALLING) {
+        setErrorStatus("Connection to signalling server lost");
+        setProgress(0);
+    }
 }
 
 function send(msg) {
@@ -271,12 +295,17 @@ function onSessionInfo(info) {
     fileSize = info.size;
 
     filename.innerText = `${info.file_name} - ${info.size} B`;
+
+    setProgress(0);
+    setStatus("");
 }
 
 function onSessionFull() {
 }
 
 async function onStartSignalling() {
+    state = STATE_SIGNALLING;
+
     startWebRtc();
     await setupSenderChannel();
 }
@@ -344,13 +373,28 @@ function onIceGatheringStateChange(event) {
 }
 
 function setSignallingStatus() {
-    status.innerHTML = `Peer: ${peerConnectionState} ICE: ${iceConnectionState}, ${iceGatheringState} (${localIceCandidates}/${remoteIceCandidates})`;
+    if (state == STATE_SIGNALLING) {
+        status.innerHTML = `Peer: ${peerConnectionState} ICE: ${iceConnectionState}, ${iceGatheringState} (${localIceCandidates}/${remoteIceCandidates})`;
+    }
+}
+
+function onUploaderDataChannelError(event) {
+    console.log(event);
+
+    setErrorStatus("Error while uploading");
+}
+
+function onDownloaderDataChannelError(event) {
+    console.log(event);
+
+    setErrorStatus("Error while downloading");
 }
 
 async function setupSenderChannel() {
     channel = peerConnection.createDataChannel("sendChannel");
     channel.onopen = channelStatusChange;
     channel.onclose = channelStatusChange;
+    channel.onerror = onUploaderDataChannelError;
 
     let offer = await peerConnection.createOffer();
     await peerConnection.setLocalDescription(offer);
@@ -362,10 +406,13 @@ function setupReceiverChannel() {
 }
 
 function receiveChannel(event) {
+    state = STATE_TRANSFERRING;
+
     console.log("Receive channel:");
     console.log(event);
 
     channel = event.channel;
+    channel.onerror = onDownloaderDataChannelError;
     channel.onmessage = onReceiveData;
 
     setStatus("Waiting for file to be sent");
@@ -408,28 +455,47 @@ async function onReceiveData(event) {
     // console.log(event.data);
 }
 
+let uploadInterval = null;
+
 async function channelStatusChange(event) {
     console.log("Channel status change:");
     console.log(event);
 
     if (event.type == "open") {
+        state = STATE_TRANSFERRING;
+        setStatus("Uploading");
+
         console.log("start sending");
 
         const CHUNK_SIZE = 1 << 16;
 
-        for (let i = 0; i < fileToShare.size; i += CHUNK_SIZE) {
-            let size = Math.min(i + CHUNK_SIZE, fileToShare.size);
-            let blob = fileToShare.slice(i, size);
+        let i = 0;
+        uploadInterval = setInterval(async function() {
+            while (channel.bufferedAmount < 1024 * 1024) {
+                let end = Math.min(i + CHUNK_SIZE, fileToShare.size);
+                let blob = fileToShare.slice(i, end);
+
+                await channel.send(blob);
+
+                setProgress(end / fileToShare.size);
+
+                i += CHUNK_SIZE;
+
+                if (i >= fileToShare.size) {
+                    clearInterval(uploadInterval);
+                    setStatus("Finished uploading");
+                }
+            }
+        }, 25);
+
+        /*for (let i = 0; i < fileToShare.size; i += CHUNK_SIZE) {
+            let end = Math.min(i + CHUNK_SIZE, fileToShare.size);
+            let blob = fileToShare.slice(i, end);
 
             await channel.send(blob);
 
-            setStatus("Uploading");
-            setProgress((i + size) / fileToShare.size);
-            // let buffer = await blob.arrayBuffer();
-
-            // console.log(`i=${i}, ${i / fileToShare.size}`);
-        }
-        // start sending
+            setProgress(end / fileToShare.size);
+        }*/
     }
 }
 
@@ -453,16 +519,16 @@ function onLocalIceCandidate(event) {
 }
 
 function downloadFromFragment(fragment) {
+    setStatus("Connecting to session...");
+
     socket = new WebSocket('ws://localhost:8080/signalling');
     socket.onmessage = onMessage;
-    socket.onclose = (err) => console.error(err);
+    socket.onclose = onDownloaderSignallingSocketClosed;
 
     socket.onopen = function() {
         send({ "JoinSession": {"id": fragment} });
 
         downloading = true;
-
-        setStatus("Connecting to session...");
     };
 }
 

@@ -409,7 +409,7 @@ async fn start() -> anyhow::Result<()> {
         .route("/signalling", get(websocket_signalling))
         .layer(AddExtensionLayer::new(data.clone()));
 
-    let addr = "127.0.0.1:12489".parse().unwrap();
+    let addr = "127.0.0.1:8080".parse().unwrap();
     hyper::Server::bind(&addr)
         .serve(app.into_make_service())
         .await

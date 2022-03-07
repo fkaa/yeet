@@ -15,6 +15,9 @@ div#dropzone {
 .border {border:15px dashed black}
 .disabled {color:gray}
 
+.error {
+    color: red;
+}
 .mark {background-color:yellow;}
 .disabled .mark {
     background-color: transparent;
@@ -25,6 +28,7 @@ div#dropzone {
 }
 #share-link {
     display: none;
+    word-break: break-word;
 }
 #download-file {
     display: none;

@@ -1,7 +1,6 @@
 <!DOCTYPE html>
 <html>
   <head>
-    <!--<link rel="stylesheet" href="swiss.css" />-->
     <link rel="stylesheet" href="style.css" />
     <meta charset="utf-8">
   </head>
@@ -21,11 +20,9 @@
           </div>
 
           <div id="sharing">
-
-            <h1>Status</h1>
-            <div>
-              <progress id="progress">test</progress>
-              <p id="status"></p>
+            <div id="share-link">
+              <h1>Link</h1>
+              <p><a id="link"></a></p>
             </div>
 
             <div id="download-file">
@@ -34,18 +31,18 @@
               <button id="dl-btn">Start download</button>
             </div>
 
-            <div id="share-link">
-              <h1>Link</h1>
-              <p><a id="link" href="#test"></a></p>
+            <h1>Status</h1>
+            <div>
+              <progress id="progress">test</progress>
+              <div id="status-log">
+              </div>
+              <p id="status"></p>
             </div>
-
           </div>
         </div>
       </div>
     </div>
-    <div id="dropzone">
-    </div>
-    <!--<script src="StreamSaver.js"></script>-->
+    <div id="dropzone"></div>
     <script src="app.js"></script>
   </body>
 </html>
