@@ -14,6 +14,7 @@ if ('serviceWorker' in navigator) {
     console.error("No service worker!");
 }
 
+let firefox = navigator.userAgent.indexOf('Firefox') !== -1;
 let href = window.location.href;
 let host = window.location.host;
 let secure = window.location.protocol.startsWith("https");
@@ -172,16 +173,20 @@ function startDownload() {
 }
 
 function download(href) {
-    var element = document.createElement('a');
-    element.setAttribute('href', href);
-    element.setAttribute('download', "");
+    if (firefox) {
+        var element = document.createElement('a');
+        element.setAttribute('href', href);
+        element.setAttribute('download', "");
 
-    element.style.display = 'none';
-    document.body.appendChild(element);
+        element.style.display = 'none';
+        document.body.appendChild(element);
 
-    element.click();
+        element.click();
 
-    document.body.removeChild(element);
+        document.body.removeChild(element);
+    } else {
+        location.href = href;
+    }
 }
 
 function startFakeDownloadRequest(fileName, fileSize) {

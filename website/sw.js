@@ -62,7 +62,7 @@ self.addEventListener('message', function(event) {
 
                         let { data, done } = event.data;
 
-                        console.log("Received chunk, done: " + done);
+                        // console.log("Received chunk, done: " + done);
 
                         if (done) {
                             console.log("Response complete, closing");
