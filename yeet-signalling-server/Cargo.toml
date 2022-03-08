@@ -1,5 +1,5 @@
 [package]
-name = "xfer"
+name = "yeet-signalling-server"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,6 +8,7 @@ axum = { version = "0.4", features = ["ws"] }
 hyper = { version = "0.14", features = ["full"] }
 tokio = { version = "1.0", features = ["full"] }
 
+argh = "*"
 anyhow = "1.0"
 async-trait = "0.1"
 futures = "0.3"

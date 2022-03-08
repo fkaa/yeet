@@ -14,6 +14,10 @@ if ('serviceWorker' in navigator) {
     console.error("No service worker!");
 }
 
+let href = window.location.href;
+let host = window.location.host;
+let secure = window.location.protocol.startsWith("https");
+let ws = secure ? `wss://${host}/signalling` : `ws://localhost:8080/signalling`;
 let msgChannel = new MessageChannel();
 
 function dec2hex (dec) {
@@ -228,7 +232,7 @@ function share() {
     setProgress(null);
     setStatus("Creating link...");
 
-    socket = new WebSocket('ws://localhost:8080/signalling');
+    socket = new WebSocket(ws);
     socket.onclose = onUploaderSignallingSocketClosed;
     socket.onmessage = onMessage;
 
@@ -337,8 +341,8 @@ async function onNewIceCandidate(candidate) {
 }
 
 function onUploadFileResponse(response) {
-    link.innerText = `localhost:8000/#${response.link}`;
-    link.href = `localhost:8000/#${response.link}`;
+    link.innerText = `${host}/#${response.link}`;
+    link.href = `${href}#${response.link}`;
 }
 
 function startWebRtc() {
@@ -475,6 +479,7 @@ async function channelStatusChange(event) {
                 let end = Math.min(i + CHUNK_SIZE, fileToShare.size);
                 let blob = fileToShare.slice(i, end);
 
+                console.log(end / fileToShare.size);
                 await channel.send(blob);
 
                 setProgress(end / fileToShare.size);
@@ -484,6 +489,7 @@ async function channelStatusChange(event) {
                 if (i >= fileToShare.size) {
                     clearInterval(uploadInterval);
                     setStatus("Finished uploading");
+                    break;
                 }
             }
         }, 25);
@@ -521,7 +527,7 @@ function onLocalIceCandidate(event) {
 function downloadFromFragment(fragment) {
     setStatus("Connecting to session...");
 
-    socket = new WebSocket('ws://localhost:8080/signalling');
+    socket = new WebSocket(ws);
     socket.onmessage = onMessage;
     socket.onclose = onDownloaderSignallingSocketClosed;
 

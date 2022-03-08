@@ -400,7 +400,7 @@ async fn handle_websocket_signalling(socket: WebSocket, data: Arc<AppData>) -> R
     }
 }
 
-async fn start() -> anyhow::Result<()> {
+async fn start(addr: SocketAddr) -> anyhow::Result<()> {
     let data = Arc::new(AppData {
         sessions: Arc::new(RwLock::new(HashMap::new())),
     });
@@ -409,7 +409,8 @@ async fn start() -> anyhow::Result<()> {
         .route("/signalling", get(websocket_signalling))
         .layer(AddExtensionLayer::new(data.clone()));
 
-    let addr = "127.0.0.1:8080".parse().unwrap();
+    info!("Listening for signalling attempts on {addr}");
+
     hyper::Server::bind(&addr)
         .serve(app.into_make_service())
         .await
@@ -418,7 +419,17 @@ async fn start() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(argh::FromArgs)]
+/// Command
+struct Args {
+    /// address to listen to
+    #[argh(positional)]
+    address: SocketAddr,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Args = argh::from_env();
+
     let filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new("debug"))
         .unwrap();
@@ -431,7 +442,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async { start().await })?;
+        .block_on(async { start(args.address).await })?;
 
     Ok(())
 }
