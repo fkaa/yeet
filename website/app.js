@@ -14,6 +14,7 @@ if ('serviceWorker' in navigator) {
     console.error("No service worker!");
 }
 
+
 let firefox = navigator.userAgent.indexOf('Firefox') !== -1;
 let href = window.location.href;
 let host = window.location.host;
@@ -188,6 +189,11 @@ function download(href) {
         location.href = href;
     }
 }
+
+var ping = location.href.substr(0, location.href.lastIndexOf('/')) + '/ping'
+setInterval(function() {
+    fetch(ping);
+}, 10000);
 
 function startFakeDownloadRequest(fileName, fileSize) {
     let name = encodeURIComponent(fileName.replace(/\//g, ':'))
@@ -427,41 +433,78 @@ function receiveChannel(event) {
     setStatus("Waiting for file to be sent");
 }
 
+let chunks = [];
+let chunkFeedInterval = null;
+let currentIdx = 0;
+let feeding = false;
+
+function chunkFeeder() {
+    if (feeding) {
+        return;
+    }
+
+    feeding = true;
+
+    chunks.sort(function(a, b) { return a.idx - b.idx; });
+
+    while (chunks.length > 0) {
+        let chunk = chunks[0];
+        if (chunk.idx == currentIdx) {
+            if (chunk.done) {
+                msgChannel.port1.postMessage({ data: chunk.data, done: false });
+                msgChannel.port1.postMessage({ data: null, done: true });
+            } else {
+                msgChannel.port1.postMessage(chunk);
+            }
+
+            currentIdx++;
+            chunks.shift();
+        } else {
+            break;
+        }
+    }
+
+    feeding = false;
+}
+
+let chunkIdx = 0;
 async function onReceiveData(event) {
+    let idx = chunkIdx++;
+
     // console.log(event);
     let blob = event.data;
-
-
-    setStatus("Downloading...");
-
 
     let data = blob;
     if (blob.arrayBuffer !== undefined) {
         data = await blob.arrayBuffer();
     }
-
-    receivedBytes += data.byteLength;
-
-    // console.log(receivedBytes / fileSize);
-    setProgress(receivedBytes / fileSize);
-
-    // let data = await blob.arrayBuffer();
     data = new Uint8Array(data);
+    receivedBytes += data.byteLength;
     let isDone = receivedBytes == fileSize;
+    let chunk = { data: data, idx: idx, done: isDone };
 
-    if (isDone) {
-        msgChannel.port1.postMessage({ data: data, done: false });
-        msgChannel.port1.postMessage({ data: null, done: true });
-    } else {
-        msgChannel.port1.postMessage({ data: data, done: false });
-    }
+    chunks.push(chunk);
 
+    setStatus("Downloading...");
+    setProgress(receivedBytes / fileSize);
     if (isDone) {
-        // await writer.close();
+        clearInterval(chunkFeedInterval);
         setStatus("Completed download");
     }
 
-    // console.log(event.data);
+    chunkFeeder();
+    if (chunkFeedInterval == null) {
+        chunkFeedInterval = setInterval(chunkFeeder, 250);
+    }
+
+    /*console.log(`Sending ${idx} to SW`);
+
+    if (isDone) {
+        msgChannel.port1.postMessage();
+        msgChannel.port1.postMessage({ data: null, idx: idx + 1, done: true });
+    } else {
+        msgChannel.port1.postMessage({ data: data, idx: idx, done: false });
+    }*/
 }
 
 let uploadInterval = null;
@@ -477,19 +520,22 @@ async function channelStatusChange(event) {
         console.log("start sending");
 
         const CHUNK_SIZE = 1 << 16;
+        const BUFFER_LIMIT = 1024 * 1024 * 30;
 
         let i = 0;
         uploadInterval = setInterval(async function() {
-            while (channel.bufferedAmount < 1024 * 1024) {
+            let amt = BUFFER_LIMIT - channel.bufferedAmount;
+            while (amt >= CHUNK_SIZE) {
                 let end = Math.min(i + CHUNK_SIZE, fileToShare.size);
                 let blob = fileToShare.slice(i, end);
 
-                console.log(end / fileToShare.size);
+                // console.log(end / fileToShare.size);
                 await channel.send(blob);
 
                 setProgress(end / fileToShare.size);
 
                 i += CHUNK_SIZE;
+                amt -= CHUNK_SIZE;
 
                 if (i >= fileToShare.size) {
                     clearInterval(uploadInterval);

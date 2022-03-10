@@ -23,6 +23,10 @@ self.addEventListener('fetch', function(event) {
 
     let url = event.request.url;
 
+    if (url.endsWith("ping")) {
+        return event.respondWith(new Response("pong"))
+    }
+
     if (transfers[url] == undefined) {
         console.log("Responding normally");
         return null;
@@ -57,20 +61,18 @@ self.addEventListener('message', function(event) {
                 start(controller) {
                     console.log("Starting");
                     port.onmessage = function(event) {
-                        // console.log("Got message");
-                        // console.log(event);
+                        let done = false;
+                        let chunk = event.data;
 
-                        let { data, done } = event.data;
+                        if (chunk.data != null) {
+                            controller.enqueue(chunk.data);
+                        }
 
-                        // console.log("Received chunk, done: " + done);
-
-                        if (done) {
+                        if (chunk.done) {
                             console.log("Response complete, closing");
                             controller.close();
                             return;
                         }
-
-                        controller.enqueue(data);
                     };
 
                     console.log("Finished starting");
