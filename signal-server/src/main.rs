@@ -1,29 +1,16 @@
-use std::{net::SocketAddr, sync::Arc};
-
-use axum::{
-    extract::{
-        ws::{Message, WebSocket},
-        Extension, Path, WebSocketUpgrade,
-    },
-    response::{IntoResponse, Response},
-    routing::get,
-    AddExtensionLayer, Router,
-};
 use futures_util::{stream::StreamExt, SinkExt};
-use hyper::StatusCode;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::broadcast;
 use tokio::sync::RwLock;
-use tokio::sync::{
-    broadcast::{self},
-    oneshot,
-};
+use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 use tracing::*;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::{net::SocketAddr, sync::Arc};
 
 /// Contains the channel receivers that incoming websocket connections
 /// should use.
@@ -36,10 +23,6 @@ struct SessionState {
     cancellation_tx: broadcast::Sender<()>,
     cancellation_rx: broadcast::Receiver<()>,
     participants: Mutex<(bool, bool)>,
-    // bob: Option<Receiver<ClientMessage>>,
-    // bob_sender: Sender<ClientMessage>,
-    // alice: Option<Receiver<ClientMessage>>,
-    // alice_sender: Sender<ClientMessage>,
 }
 
 impl SessionState {
@@ -110,48 +93,31 @@ struct AppData {
     sessions: Arc<RwLock<HashMap<String, SessionState>>>,
 }
 
-enum ServerMessage {}
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 enum ClientMessage {
     /// An offer to upload a file
-    UploadFile {
-        name: String,
-        size: u64,
-    },
+    #[serde(rename = "upload")]
+    UploadFile { name: String, size: u64 },
 
     /// Response to file upload
-    UploadFileResponse {
-        link: String,
-    },
+    #[serde(rename = "response")]
+    UploadFileResponse { link: String },
 
-    JoinSession {
-        id: String,
-    },
+    /// Request to join a session
+    #[serde(rename = "join")]
+    JoinSession { id: String },
 
-    /// Information about a session
-    SessionInfo {
-        file_name: String,
-        size: u64,
-    },
-
-    /// Someone has joined the session
-    ParticipantJoin,
-
-    /// Someone has left the session
-    ParticipantLeave,
-
-    CreateSession,
+    #[serde(rename = "signal")]
     StartSignalling,
+
+    #[serde(rename = "full")]
     SessionFull,
+
+    #[serde(rename = "notfound")]
     SessionNotFound,
+
+    #[serde(rename = "cancelled")]
     SessionCancelled,
-
-    Download,
-
-    FileOfferResponse {
-        answer: bool,
-    },
 
     /// A new ICE candidate to be forwarded to the other participant
     #[serde(rename = "candidate")]
@@ -172,17 +138,22 @@ enum ClientMessage {
     /// Answer from the other participant
     #[serde(rename = "answer")]
     SdpAnswer(String),
-}
 
-async fn websocket_signalling(
-    ws: WebSocketUpgrade,
-    Extension(data): Extension<Arc<AppData>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_websocket_signalling(socket, data))
+    /// Information about a session
+    #[serde(rename = "info")]
+    SessionInfo { file_name: String, size: u64 },
+
+    /// Someone has joined the session
+    #[serde(rename = "participant")]
+    ParticipantJoin,
+
+    /// Someone has left the session
+    #[serde(rename = "participantleft")]
+    ParticipantLeave,
 }
 
 async fn signalling_loop(
-    mut socket: WebSocket,
+    socket: WebSocketStream<TcpStream>,
     id: String,
     tx: broadcast::Sender<ClientMessage>,
     mut rx: broadcast::Receiver<ClientMessage>,
@@ -235,13 +206,14 @@ async fn signalling_loop(
     }
 }
 
-async fn wait_for_message(socket: &mut WebSocket) -> anyhow::Result<ClientMessage> {
+async fn wait_for_message(
+    socket: &mut WebSocketStream<TcpStream>,
+) -> anyhow::Result<ClientMessage> {
     loop {
-        let msg = socket.recv().await;
+        let msg = socket.next().await;
 
         match msg {
             Some(Ok(Message::Text(txt))) => {
-                dbg!(&txt);
                 let msg = serde_json::from_str(&txt)?;
 
                 return Ok(msg);
@@ -255,8 +227,9 @@ async fn wait_for_message(socket: &mut WebSocket) -> anyhow::Result<ClientMessag
         }
     }
 }
+
 async fn handle_file_upload(
-    mut socket: WebSocket,
+    mut socket: WebSocketStream<TcpStream>,
     data: Arc<AppData>,
     file_name: String,
     size: u64,
@@ -298,10 +271,10 @@ async fn handle_file_upload(
     match signalling_loop(socket, link.clone(), tx, rx, c_rx, true).await {
         Ok(_) => {
             debug!(id = ?link, uploader = true, "Finished signalling loop");
-        },
+        }
         Err(e) => {
             error!(id = ?link, uploader = true, "Failed to finish signalling loop: {e}");
-        },
+        }
     }
 
     debug!(id = ?link,"Removing session");
@@ -313,7 +286,10 @@ async fn handle_file_upload(
     Ok(())
 }
 
-async fn handle_first_message(mut socket: WebSocket, data: Arc<AppData>) -> anyhow::Result<()> {
+async fn handle_first_message(
+    mut socket: WebSocketStream<TcpStream>,
+    data: Arc<AppData>,
+) -> anyhow::Result<()> {
     match wait_for_message(&mut socket).await? {
         ClientMessage::UploadFile { name, size } => {
             handle_file_upload(socket, data, name, size).await?
@@ -325,7 +301,10 @@ async fn handle_first_message(mut socket: WebSocket, data: Arc<AppData>) -> anyh
     Ok(())
 }
 
-async fn send(socket: &mut WebSocket, message: &ClientMessage) -> anyhow::Result<()> {
+async fn send(
+    socket: &mut WebSocketStream<TcpStream>,
+    message: &ClientMessage,
+) -> anyhow::Result<()> {
     socket
         .send(Message::Text(serde_json::to_string(&message).unwrap()))
         .await?;
@@ -334,7 +313,7 @@ async fn send(socket: &mut WebSocket, message: &ClientMessage) -> anyhow::Result
 }
 
 async fn handle_join_session(
-    mut socket: WebSocket,
+    mut socket: WebSocketStream<TcpStream>,
     data: Arc<AppData>,
     id: String,
 ) -> anyhow::Result<()> {
@@ -372,10 +351,10 @@ async fn handle_join_session(
     match signalling_loop(socket, id.clone(), tx, rx, c_rx, false).await {
         Ok(_) => {
             debug!(id = ?id, uploader = false, "Finished signalling loop");
-        },
+        }
         Err(e) => {
             error!(id = ?id, uploader = false, "Failed to finish signalling loop: {e}");
-        },
+        }
     }
 
     let mut sessions = data.sessions.write().await;
@@ -386,18 +365,22 @@ async fn handle_join_session(
     Ok(())
 }
 
-async fn handle_websocket_signalling(socket: WebSocket, data: Arc<AppData>) -> Response<()> {
-    match handle_first_message(socket, data).await {
-        Ok(()) => Response::builder().status(StatusCode::OK).body(()).unwrap(),
-        Err(e) => {
-            error!("Failed to complete signalling: {e}");
+async fn handle_connection(
+    data: Arc<AppData>,
+    raw_stream: TcpStream,
+    addr: SocketAddr,
+) -> anyhow::Result<()> {
+    debug!("Incoming TCP connection from: {}", addr);
 
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(())
-                .unwrap()
-        }
+    let ws_stream = tokio_tungstenite::accept_async(raw_stream).await?;
+
+    debug!("WebSocket connection established: {}", addr);
+
+    if let Err(e) = handle_first_message(ws_stream, data).await {
+        warn!("Failed to do signalling: {e}");
     }
+
+    Ok(())
 }
 
 async fn start(addr: SocketAddr) -> anyhow::Result<()> {
@@ -405,30 +388,57 @@ async fn start(addr: SocketAddr) -> anyhow::Result<()> {
         sessions: Arc::new(RwLock::new(HashMap::new())),
     });
 
-    let app = Router::new()
-        .route("/signalling", get(websocket_signalling))
-        .layer(AddExtensionLayer::new(data.clone()));
+    let try_socket = TcpListener::bind(&addr).await;
+    let listener = try_socket.expect("Failed to bind");
+    info!("Listening for WebSocket connections on: {}", addr);
 
-    info!("Listening for signalling attempts on {addr}");
-
-    hyper::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    while let Ok((stream, addr)) = listener.accept().await {
+        tokio::spawn(handle_connection(data.clone(), stream, addr));
+    }
 
     Ok(())
 }
 
-#[derive(argh::FromArgs)]
-/// Command
+const HELP: &str = "\
+yeet signalling server
+
+USAGE:
+  yeet-signal-server address
+
+FLAGS:
+  -h, --help            Prints help information
+
+ARGS:
+  address               The address to listen to
+";
+
 struct Args {
-    /// address to listen to
-    #[argh(positional)]
     address: SocketAddr,
 }
 
+fn parse_args() -> Result<Args, pico_args::Error> {
+    let mut pargs = pico_args::Arguments::from_env();
+
+    if pargs.contains(["-h", "--help"]) {
+        print!("{}", HELP);
+        std::process::exit(0);
+    }
+
+    let args = Args {
+        address: pargs.free_from_str()?,
+    };
+
+    Ok(args)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Args = argh::from_env();
+    let args: Args = match parse_args() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Error: {}.", e);
+            std::process::exit(1);
+        }
+    };
 
     let filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new("debug"))

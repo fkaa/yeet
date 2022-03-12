@@ -1,20 +1,16 @@
 [package]
-name = "yeet-signalling-server"
+name = "yeet-signal-server"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = { version = "0.4", features = ["ws"] }
-hyper = { version = "0.14", features = ["full"] }
-tokio = { version = "1.0", features = ["full"] }
-
-argh = "*"
 anyhow = "1.0"
-async-trait = "0.1"
-futures = "0.3"
-futures-util = "0.3"
+rand = "*"
+pico-args = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tracing-subscriber = { version="0.3", features = ["env-filter"] }
+tokio = { version = "1.0", features = ["full"] }
+tokio-tungstenite = "0.17"
+futures-util = "0.3"
 tracing = "0.1"
-rand = "*"
+tracing-subscriber = { version="0.3", features = ["env-filter"] }

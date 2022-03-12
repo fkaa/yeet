@@ -232,7 +232,7 @@ function onServiceWorkerMessage(event) {
     startWebRtc();
     setupReceiverChannel();
 
-    send("StartSignalling");
+    send("signal");
 }
 
 function share() {
@@ -248,7 +248,7 @@ function share() {
     socket.onmessage = onMessage;
 
     socket.onopen = function() {
-        send({ "UploadFile": {"name": fileToShare.name, "size": fileToShare.size } });
+        send({ "upload": {"name": fileToShare.name, "size": fileToShare.size } });
         uploading = true;
 
         statusDiv.style.display = "block";
@@ -284,15 +284,15 @@ async function onMessage(event) {
     console.log("msg!");
     console.log(event.data);
 
-    if (msg.UploadFileResponse != null) {
-        onUploadFileResponse(msg.UploadFileResponse);
-    } else if (msg.ParticipantJoin != null) {
+    if (msg.response != null) {
+        onUploadFileResponse(msg.response);
+    } else if (msg.participant != null) {
         onParticipantJoin();
-    } else if (msg.SessionInfo != null) {
-        onSessionInfo(msg.SessionInfo);
-    } else if (msg == "SessionFull") {
+    } else if (msg.info != null) {
+        onSessionInfo(msg.info);
+    } else if (msg == "full") {
         onSessionFull();
-    } else if (msg == "StartSignalling") {
+    } else if (msg == "signal") {
         await onStartSignalling();
     } else if (msg.answer != null) {
         await onSdpAnswer(msg.answer);
@@ -583,7 +583,7 @@ function downloadFromFragment(fragment) {
     socket.onclose = onDownloaderSignallingSocketClosed;
 
     socket.onopen = function() {
-        send({ "JoinSession": {"id": fragment} });
+        send({ "join": {"id": fragment} });
 
         downloading = true;
     };
